@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Image → G-code (Laser / Pen)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Image → G-code (Laser or Pen Plotter)</h1>
+    <p>Load an image, tune settings, preview toolpath, and download G-code.</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div class="control-row">
+        <label>Image:
+          <input id="fileInput" type="file" accept="image/*" />
+        </label>
+        <button id="useSampleBtn">Use Sample Image</button>
+      </div>
+
+      <div class="control-row">
+        <label>Mode:
+          <select id="modeSelect">
+            <option value="laser">Laser (M3 S-power)</option>
+            <option value="pen">Pen Plotter (pen up/down via Z)</option>
+          </select>
+        </label>
+
+        <label>Width (mm):
+          <input id="widthMM" type="number" value="100" min="1" step="1" />
+        </label>
+
+        <label>Resolution (dpi):
+          <input id="dpi" type="number" value="150" min="10" max="1200" />
+        </label>
+      </div>
+
+      <div class="control-row">
+        <label>Feed (mm/min):
+          <input id="feedRate" type="number" value="1200" />
+        </label>
+
+        <label>Line spacing (mm):
+          <input id="lineSpacing" type="number" value="0.17" step="0.01" />
+        </label>
+
+        <label>Invert:
+          <input id="invert" type="checkbox" />
+        </label>
+      </div>
+
+      <div class="control-row">
+        <label>Laser Max Power (S value):
+          <input id="laserMax" type="number" value="255" min="0" max="255" />
+        </label>
+
+        <label>Pen Z Up (mm):
+          <input id="zUp" type="number" value="2" step="0.1" />
+        </label>
+
+        <label>Pen Z Down (mm):
+          <input id="zDown" type="number" value="0" step="0.1" />
+        </label>
+      </div>
+
+      <div class="buttons">
+        <button id="generateBtn">Generate G-code</button>
+        <button id="downloadBtn" disabled>Download G-code</button>
+        <button id="showPreviewBtn" disabled>Show Preview</button>
+      </div>
+    </section>
+
+    <section class="preview">
+      <h2>Preview</h2>
+      <div class="canvas-wrap">
+        <canvas id="imageCanvas"></canvas>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
+      <p class="hint">Zoom your browser or resize window to view large images. Preview draws the planned toolpaths on top of the image.</p>
+    </section>
+
+    <section class="gcode">
+      <h2>G-code Output</h2>
+      <textarea id="gcodeOutput" readonly></textarea>
+    </section>
+  </main>
+
+  <footer>
+    <small>Created for NB-Gcode-generator-for-Bonus-Points — client-side static demo. Adjust G-code header/footer to match your machine controller.</small>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

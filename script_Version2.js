@@ -1,0 +1,319 @@
+// Client-side image -> raster G-code generator
+// Works in modern browsers. No server required.
+// Author: prepared for NB-Gcode-generator-for-Bonus-Points
+
+const fileInput = document.getElementById('fileInput');
+const useSampleBtn = document.getElementById('useSampleBtn');
+const modeSelect = document.getElementById('modeSelect');
+const widthMM = document.getElementById('widthMM');
+const dpi = document.getElementById('dpi');
+const feedRate = document.getElementById('feedRate');
+const lineSpacing = document.getElementById('lineSpacing');
+const invert = document.getElementById('invert');
+const laserMax = document.getElementById('laserMax');
+const zUp = document.getElementById('zUp');
+const zDown = document.getElementById('zDown');
+
+const generateBtn = document.getElementById('generateBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const showPreviewBtn = document.getElementById('showPreviewBtn');
+
+const imageCanvas = document.getElementById('imageCanvas');
+const overlayCanvas = document.getElementById('overlayCanvas');
+const gcodeOutput = document.getElementById('gcodeOutput');
+
+let loadedImage = null;
+let lastGcode = '';
+
+fileInput.addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  await loadImage(url);
+  URL.revokeObjectURL(url);
+});
+
+useSampleBtn.addEventListener('click', async () => {
+  // Simple embedded sample (SVG data URL)
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='600' height='600'><rect width='100%' height='100%' fill='white'/><g stroke='black' stroke-width='4' fill='none'><circle cx='300' cy='200' r='120'/><path d='M200 360 q100 100 200 0' stroke-linecap='round' stroke-linejoin='round'/></g></svg>`;
+  const url = 'data:image/svg+xml;base64,' + btoa(svg);
+  await loadImage(url);
+});
+
+async function loadImage(src){
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise((res, rej) => {
+    img.onload = () => res();
+    img.onerror = () => rej(new Error('Failed to load image'));
+    img.src = src;
+  });
+  loadedImage = img;
+  drawImageToCanvas();
+  showPreviewBtn.disabled = false;
+  generateBtn.disabled = false;
+}
+
+function drawImageToCanvas(){
+  if (!loadedImage) return;
+  const ctx = imageCanvas.getContext('2d');
+  // Fit to widthMM and DPI later when generating; for preview we show native pixels scaled to fit canvas area.
+  const maxW = 1200; // preview maximum for performance
+  const scale = Math.min(1, maxW / loadedImage.width);
+  imageCanvas.width = Math.round(loadedImage.width * scale);
+  imageCanvas.height = Math.round(loadedImage.height * scale);
+  overlayCanvas.width = imageCanvas.width;
+  overlayCanvas.height = imageCanvas.height;
+  ctx.clearRect(0,0,imageCanvas.width,imageCanvas.height);
+  ctx.drawImage(loadedImage, 0, 0, imageCanvas.width, imageCanvas.height);
+}
+
+// Convert image into grayscale 2D array at target resolution (width in mm -> pixels)
+// Returns {pixels[w][h] intensity 0-255, pixelWidthMM, widthPx, heightPx}
+function rasterizeImageToGrid(){
+  if (!loadedImage) throw new Error('No image loaded');
+  // target physical width in mm, DPI and lineSpacing define height
+  const targetWidthMM = parseFloat(widthMM.value);
+  const targetDPI = parseFloat(dpi.value);
+  const spacingMM = parseFloat(lineSpacing.value);
+
+  // Convert DPI to pixels per mm: dpi / 25.4
+  const pxPerMM = targetDPI / 25.4;
+  const targetWidthPx = Math.max(1, Math.round(targetWidthMM * pxPerMM));
+  // maintain aspect ratio
+  const aspect = loadedImage.height / loadedImage.width;
+  const targetHeightPx = Math.max(1, Math.round(targetWidthPx * aspect));
+
+  // Draw image to offscreen canvas at this pixel size
+  const c = document.createElement('canvas');
+  c.width = targetWidthPx;
+  c.height = targetHeightPx;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(loadedImage, 0, 0, c.width, c.height);
+  const imgd = ctx.getImageData(0,0,c.width,c.height);
+  const data = imgd.data;
+  // build 2D grayscale array
+  const pixels = [];
+  for (let y=0;y<c.height;y++){
+    const row = new Uint8ClampedArray(c.width);
+    for (let x=0;x<c.width;x++){
+      const idx = (y*c.width + x) * 4;
+      const r = data[idx], g = data[idx+1], b = data[idx+2];
+      const gray = (0.299*r + 0.587*g + 0.114*b) | 0;
+      row[x] = gray;
+    }
+    pixels.push(row);
+  }
+
+  return {
+    pixels,
+    pixelWidthMM: 1 / pxPerMM,
+    widthPx: c.width,
+    heightPx: c.height,
+    targetWidthMM,
+    spacingMM
+  };
+}
+
+// Build raster G-code. Uses simple scanning pattern: left-to-right then right-to-left per line.
+// Laser mode: emits M3 S{power} (S 0..laserMax). Pen mode: uses Z up/down (Z values configured).
+function buildGcodeFromRaster(grid, opts){
+  const {pixels, pixelWidthMM, widthPx, heightPx} = grid;
+  const {mode, feed, laserMaxVal, zUpVal, zDownVal, invertImage} = opts;
+  let lines = [];
+  // Header
+  lines.push('; Generated by NB Image→Gcode static app');
+  lines.push('G21 ; units in mm');
+  lines.push('G90 ; absolute coords');
+  lines.push(`F${feed}`);
+  // Move to origin (0,0 top-left assumed). We'll set our origin at top-left.
+  lines.push('G0 X0 Y0');
+
+  // Safety: pen up and laser off
+  if (mode === 'pen') {
+    lines.push(`G0 Z${zUpVal.toFixed(3)} ; pen up`);
+  } else {
+    // laser off - some controllers use M5; we'll use M5 + M3 with S
+    lines.push('M5 ; laser off');
+  }
+
+  // For scanning convert gray (0=black,255=white) to intensity (0..laserMax).
+  for (let y=0;y<heightPx;y++){
+    const row = pixels[y];
+    const yPos = (y * pixelWidthMM);
+    const leftToRight = (y % 2 === 0); // simple boustrophedon
+    if (leftToRight) {
+      // move to start of row
+      lines.push(`G0 X0 Y${yPos.toFixed(4)}`);
+    } else {
+      lines.push(`G0 X${(widthPx*pixelWidthMM).toFixed(4)} Y${yPos.toFixed(4)}`);
+    }
+
+    // Build segments to avoid issuing G1 per pixel where possible: group consecutive pixels with same action.
+    // For laser: vary S per pixel (we still group equal S). For pen: threshold -> pen down segments
+    if (mode === 'laser'){
+      const dir = leftToRight ? 1 : -1;
+      let x = leftToRight ? 0 : widthPx - 1;
+      let currentS = null;
+      let segmentStartX = x;
+      while (x >=0 && x < widthPx){
+        const g = row[x];
+        const intensity = invertImage ? 255 - g : g; // 0..255, where 0 black -> full power
+        // map 0..255 -> 0..laserMaxVal (invert so black -> max)
+        const power = Math.round(((255 - intensity) / 255) * laserMaxVal);
+        if (currentS === null){
+          currentS = power;
+          segmentStartX = x;
+        } else if (power !== currentS){
+          // flush previous segment
+          const xStartMM = segmentStartX * pixelWidthMM;
+          const xEndMM = (x + dir) * pixelWidthMM; // previous x is x+dir
+          // move to start
+          lines.push(`G0 X${xStartMM.toFixed(4)} Y${yPos.toFixed(4)}`);
+          if (currentS > 0){
+            lines.push(`M3 S${currentS} ; laser on`);
+            lines.push(`G1 X${((x + dir) * pixelWidthMM).toFixed(4)} Y${yPos.toFixed(4)}`);
+            // For variable power across line we set S per segment
+            lines.push(`G1 X${((segmentStartX) * pixelWidthMM).toFixed(4)} Y${yPos.toFixed(4)} ; segment`);
+            lines.push('M5 ; laser off');
+          } else {
+            // power==0 -> just rapid move
+            lines.push(`G0 X${((x + dir) * pixelWidthMM).toFixed(4)} Y${yPos.toFixed(4)}`);
+          }
+          currentS = power;
+          segmentStartX = x;
+        }
+        x += dir;
+      }
+      // flush last segment
+      const lastX = x - (leftToRight ? 1 : -1);
+      const xStartMM = segmentStartX * pixelWidthMM;
+      const xEndMM = lastX * pixelWidthMM;
+      lines.push(`G0 X${xStartMM.toFixed(4)} Y${yPos.toFixed(4)}`);
+      if (currentS > 0){
+        lines.push(`M3 S${currentS} ; laser on`);
+        lines.push(`G1 X${xEndMM.toFixed(4)} Y${yPos.toFixed(4)}`);
+        lines.push('M5 ; laser off');
+      }else{
+        lines.push(`G0 X${xEndMM.toFixed(4)} Y${yPos.toFixed(4)}`);
+      }
+    } else {
+      // Pen mode: threshold to decide pen down/up, then draw G1 segments
+      const threshold = 200; // can be exposed in UI later
+      const dir = leftToRight ? 1 : -1;
+      let x = leftToRight ? 0 : widthPx - 1;
+      let penDown = false;
+      let segmentStartX = null;
+      while (x >=0 && x < widthPx){
+        const g = row[x];
+        const intensity = invertImage ? 255 - g : g;
+        const shouldDraw = intensity < threshold;
+        if (shouldDraw && !penDown){
+          // start drawing
+          segmentStartX = x;
+          penDown = true;
+        } else if (!shouldDraw && penDown){
+          // end drawing at previous pixel
+          const x1 = segmentStartX * pixelWidthMM;
+          const x2 = (x - dir) * pixelWidthMM;
+          lines.push(`G0 X${x1.toFixed(4)} Y${yPos.toFixed(4)}`);
+          lines.push(`G1 Z${zDownVal.toFixed(3)} ; pen down`);
+          lines.push(`G1 X${x2.toFixed(4)} Y${yPos.toFixed(4)}`);
+          lines.push(`G1 Z${zUpVal.toFixed(3)} ; pen up`);
+          penDown = false;
+        }
+        x += dir;
+      }
+      if (penDown){
+        const x1 = segmentStartX * pixelWidthMM;
+        const x2 = ((leftToRight ? widthPx - 1 : 0) * pixelWidthMM);
+        lines.push(`G0 X${x1.toFixed(4)} Y${yPos.toFixed(4)}`);
+        lines.push(`G1 Z${zDownVal.toFixed(3)} ; pen down`);
+        lines.push(`G1 X${x2.toFixed(4)} Y${yPos.toFixed(4)}`);
+        lines.push(`G1 Z${zUpVal.toFixed(3)} ; pen up`);
+      }
+    }
+  }
+
+  // Footer
+  if (mode === 'pen'){
+    lines.push(`G0 Z${zUpVal.toFixed(3)} ; pen up`);
+  } else {
+    lines.push('M5 ; laser off');
+  }
+  lines.push('G0 X0 Y0 ; return home');
+  lines.push('M2 ; end');
+  return lines.join('\n');
+}
+
+generateBtn.addEventListener('click', () => {
+  try {
+    const grid = rasterizeImageToGrid();
+    const opts = {
+      mode: modeSelect.value,
+      feed: parseFloat(feedRate.value),
+      laserMaxVal: parseInt(laserMax.value, 10),
+      zUpVal: parseFloat(zUp.value),
+      zDownVal: parseFloat(zDown.value),
+      invertImage: invert.checked
+    };
+    const gcode = buildGcodeFromRaster(grid, opts);
+    lastGcode = gcode;
+    gcodeOutput.value = gcode;
+    downloadBtn.disabled = false;
+    showPreviewBtn.disabled = false;
+  } catch (err){
+    alert('Failed to generate: ' + (err && err.message || err));
+  }
+});
+
+downloadBtn.addEventListener('click', () => {
+  if (!lastGcode) return;
+  const blob = new Blob([lastGcode], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'output.gcode';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+showPreviewBtn.addEventListener('click', () => {
+  // Draw a simple overlay of raster lines where intensity requires action.
+  try {
+    const grid = rasterizeImageToGrid();
+    const ctx = overlayCanvas.getContext('2d');
+    overlayCanvas.width = imageCanvas.width;
+    overlayCanvas.height = imageCanvas.height;
+    ctx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
+
+    const scaleX = imageCanvas.width / grid.widthPx;
+    const scaleY = imageCanvas.height / grid.heightPx;
+    ctx.strokeStyle = 'rgba(255,0,0,0.7)';
+    ctx.lineWidth = 1;
+    for (let y=0;y<grid.heightPx;y++){
+      const row = grid.pixels[y];
+      const yPx = (y + 0.5) * scaleY;
+      ctx.beginPath();
+      for (let x=0;x<grid.widthPx;x++){
+        const intensity = invert.checked ? 255 - row[x] : row[x];
+        const shouldDraw = (modeSelect.value === 'pen') ? intensity < 200 : intensity < 240;
+        if (shouldDraw){
+          const xPx = (x + 0.5) * scaleX;
+          ctx.lineTo(xPx, yPx);
+        } else {
+          ctx.moveTo((x+1) * scaleX, yPx);
+        }
+      }
+      ctx.stroke();
+    }
+  } catch (err){
+    alert('Preview failed: ' + err.message);
+  }
+});
+
+// If user opens HTML directly, try to resize canvases to show preview
+window.addEventListener('resize', () => {
+  if (loadedImage){
+    drawImageToCanvas();
+  }
+});

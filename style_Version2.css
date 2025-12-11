@@ -1,0 +1,32 @@
+:root{
+  --accent:#007acc;
+  --bg:#fafafa;
+  --panel:#fff;
+  --muted:#666;
+}
+
+*{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+
+body{
+  margin:0;
+  padding:1rem;
+  background:var(--bg);
+  color:#111;
+}
+
+header{margin-bottom:1rem}
+h1{margin:.2rem 0}
+.controls, .preview, .gcode{background:var(--panel);padding:1rem;border-radius:8px;margin-bottom:1rem;box-shadow:0 1px 4px rgba(0,0,0,0.06)}
+
+.control-row{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}
+.control-row label{display:flex;gap:.5rem;align-items:center}
+.buttons{display:flex;gap:.5rem;margin-top:.5rem}
+button{background:var(--accent);color:#fff;border:none;padding:.5rem .8rem;border-radius:6px;cursor:pointer}
+button[disabled]{opacity:.5;cursor:not-allowed}
+.preview .canvas-wrap{position:relative;border:1px solid #eee;height:480px;display:flex;align-items:center;justify-content:center;overflow:auto}
+canvas{max-width:100%;height:auto}
+#imageCanvas{background:#fff}
+#overlayCanvas{position:absolute;left:0;top:0;pointer-events:none}
+.gcode textarea{width:100%;height:360px;font-family:monospace;padding:.5rem;border:1px solid #ddd;border-radius:6px}
+.hint{color:var(--muted);font-size:.9rem}
+footer{font-size:.9rem;color:var(--muted);margin-top:.5rem}
